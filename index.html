@@ -64,7 +64,45 @@ let activeFilter='all', searchText='';
 function cleanText(s){return String(s??'').replace(/([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])/g,'$1').replace(/\s+/g,' ').trim();}
 function canon(s){return String(s??'').replace(/\s+/g,'').trim();}
 function truncate(s,n=15){s=cleanText(s);return s.length>n?s.slice(0,n)+'…':s;}
-async function decodeURLData(){const d=new URLSearchParams(location.search).get('d');if(!d)return null;try{let b64=d.replace(/-/g,'+').replace(/_/g,'/');while(b64.length%4)b64+='=';const bin=atob(b64);const bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);const ds=new DecompressionStream('deflate');const writer=ds.writable.getWriter();const reader=ds.readable.getReader();writer.write(bytes);writer.close();const chunks=[];while(true){const {value,done}=await reader.read();if(done)break;if(value)chunks.push(value)}let len=chunks.reduce((a,b)=>a+b.length,0),out=new Uint8Array(len),off=0;for(const c of chunks){out.set(c,off);off+=c.length}return JSON.parse(new TextDecoder().decode(out));}catch(e){console.error(e);alert('URL 数据解析失败。请确认链接完整，或使用 Chrome/Edge 打开。');return null}}
+async function decodeURLData(){
+  const params=new URLSearchParams(location.search);
+  const token=params.get('d')||params.get('j');
+  if(!token)return null;
+  function tokenToBytes(t){
+    let b64=String(t).replace(/-/g,'+').replace(/_/g,'/');
+    while(b64.length%4)b64+='=';
+    const bin=atob(b64);
+    const bytes=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    return bytes;
+  }
+  function parseRaw(t){
+    const bytes=tokenToBytes(t);
+    const text=new TextDecoder().decode(bytes);
+    return JSON.parse(text);
+  }
+  // 兼容两种链接：
+  // 1. ?d=deflate压缩后的数据（旧版/短链接）
+  // 2. ?j=未压缩base64数据（讯飞星辰兼容版，不依赖Python zlib）
+  if(params.get('j')){
+    try{return parseRaw(params.get('j'));}
+    catch(e){console.error(e);alert('URL 数据解析失败，请确认链接完整。');return null;}
+  }
+  try{
+    const bytes=tokenToBytes(token);
+    const ds=new DecompressionStream('deflate');
+    const writer=ds.writable.getWriter();
+    const reader=ds.readable.getReader();
+    writer.write(bytes);writer.close();
+    const chunks=[];
+    while(true){const {value,done}=await reader.read();if(done)break;if(value)chunks.push(value)}
+    let len=chunks.reduce((a,b)=>a+b.length,0),out=new Uint8Array(len),off=0;
+    for(const c of chunks){out.set(c,off);off+=c.length}
+    return JSON.parse(new TextDecoder().decode(out));
+  }catch(e1){
+    try{return parseRaw(token);}catch(e2){console.error(e1,e2);alert('URL 数据解析失败。请确认链接完整，或使用 Chrome/Edge 打开。');return null;}
+  }
+}
 function addNode(list,map,id,label,type,entity){id=canon(id);if(!id)return; if(map.has(id)){Object.assign(map.get(id).entity||{}, entity||{}); return;} const n={id,label:cleanText(label||id),type,entity:entity||{}};list.push(n);map.set(id,n)}
 function buildGraph(data){if(data&&data.graph_json){data=typeof data.graph_json==='string'?JSON.parse(data.graph_json):data.graph_json}const nodes=[],map=new Map(),alias=new Map();const e=data.entities||{},meta=data.meta||{};const industry=e.industry_chain||{},group=e.job_group||{},job=e.job||{};const jobName=cleanText(meta.job_title||job.name||'AI数据标注师');addNode(nodes,map,industry.name||'人工智能基础数据服务产业',industry.name||'人工智能基础数据服务产业','industry_chain',industry);addNode(nodes,map,group.name||'数据标注',group.name||'数据标注','job_group',group);addNode(nodes,map,jobName,jobName,'job',job);[industry.name,group.name,job.name,meta.job_title,'AI数据标注师','AI 数 据 标 注 师','数据标注员','数据标注师'].forEach(v=>{const c=canon(v); if(!c)return; if(['AI数据标注师','数据标注员','数据标注师'].includes(c)) alias.set(c,canon(jobName)); else alias.set(c,c);});(e.tasks||[]).forEach(x=>addNode(nodes,map,x.id,x.name,'task',x));(e.competencies||[]).forEach(x=>addNode(nodes,map,x.id,x.name,'competency',x));(e.skills||[]).forEach(x=>addNode(nodes,map,x.id,x.name,'skill',x));const links=[],seen=new Set();(data.edges||[]).forEach(edge=>{let s=alias.get(canon(edge.source))||canon(edge.source),t=alias.get(canon(edge.target))||canon(edge.target);if(!map.has(s)||!map.has(t))return;const k=s+'>'+t+'>'+cleanText(edge.relation||'RELATED_TO');if(seen.has(k))return;seen.add(k);links.push({source:s,target:t,relation:cleanText(edge.relation||'RELATED_TO')})});return{nodes,links,meta:{...meta,job_title:jobName}}}
 function computeLayout(){const groups=Object.fromEntries(ORDER.map(t=>[t,graph.nodes.filter(n=>n.type===t)]));const maxN=Math.max(...Object.values(groups).map(a=>a.length),1);const colGap=230, startX=95, top=130, rowGap=58;layout.w=startX*2+colGap*(ORDER.length-1)+190;layout.h=Math.max(820,top+maxN*rowGap+120);layout.nodes=new Map();ORDER.forEach((type,ci)=>{const arr=groups[type]||[],x=startX+ci*colGap;const total=(arr.length-1)*rowGap;const base=Math.max(top,(layout.h-total)/2);arr.sort((a,b)=>a.id.localeCompare(b.id,'zh-CN')).forEach((n,i)=>{layout.nodes.set(n.id,{x,y:base+i*rowGap,w:type==='skill'?174:176,h:42})})})}
